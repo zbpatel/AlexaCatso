@@ -1,19 +1,15 @@
 'use strict';
+// Developed by Zac Patel on 6/20/17 with code contributions from Anil Patel
+// This code written in part using the sample code provided by Amazon for constructing responses
 
-/**
- * This sample demonstrates a simple skill built with the Amazon Alexa Skills Kit.
- * The Intent Schema, Custom Slots, and Sample Utterances for this skill, as well as
- * testing instructions are located at http://amzn.to/1LzFrj6
- *
- * For additional samples, visit the Alexa Skills Kit Getting Started guide at
- * http://amzn.to/1LGWsLG
- */
-
+// importing node packages
+var request = require('request');
+var fs = require('fs');
+var _ = require('underscore');
 
 // --------------- Helpers that build all of the responses -----------------------
 
-// Modify this method to properly handle the cat photos that are being sent
-// This is going to require a simple function to turn a single url into a formatted string with a newline etc.
+// Standard Speechlet response (used for making non-image responses)
 function buildSpeechletResponse(title, output, repromptText, shouldEndSession) {
     return {
         outputSpeech: {
@@ -35,6 +31,33 @@ function buildSpeechletResponse(title, output, repromptText, shouldEndSession) {
     };
 }
 
+// Constructs a speechlet response that includes an image in the card (that appears in the Alexa companion app)
+function buildPhotoSpeechletResponse(title, speechOutput, textOutput, lImageURL, sImageURL, repromptText, shouldEndSession) {
+    return {
+        outputSpeech: {
+            type: 'PlainText',
+            text: speechOutput,
+        },
+        card: {
+            type: 'Standard',
+            title: `${title}`,
+            content: `${textOutput}`,
+            image: {
+                smallImageUrl: sImageURL,
+                largeImageUrl: lImageURL,
+            }
+        },
+        reprompt: {
+            outputSpeech: {
+                type: 'PlainText',
+                text: repromptText,
+            },
+        },
+        shouldEndSession,
+    };
+}
+
+// Combines the session attributes and speechlet response, and sends them back to Alexa to be presented to the user
 function buildResponse(sessionAttributes, speechletResponse) {
     return {
         version: '1.0',
@@ -42,7 +65,6 @@ function buildResponse(sessionAttributes, speechletResponse) {
         response: speechletResponse,
     };
 }
-
 
 // --------------- Functions that control the skill's behavior -----------------------
 
@@ -69,10 +91,25 @@ function handleSessionEndRequest(callback) {
     callback({}, buildSpeechletResponse(cardTitle, speechOutput, null, shouldEndSession));
 }
 
+// -------------- Main Intent Code --------------
 // Broad-scale event handler called from onIntent. This method handles the entire process of querying photos,
 // processing them, and sending them to the user's device in the speechlet response 
 function getCatPhotosHandler(intent, session, callback) {
+    // using let instead of var here because we don't need these values outside this scope
 
+    // setting standard vars for output into 
+    let cardTitle = "Cat Photos";
+    let repromptText = '';
+    let sessionAttributes = {};
+    let shouldEndSession = true;
+    let speechOutput = '';
+    let textOutput = '';
+
+    // grabbing the image URLs from reddit
+    
+
+    callback(sessionAttributes,
+          buildPhotoSpeechletResponse(title, speechOutput, textOutput, lImageURL, sImageURL, repromptText, shouldEndSession));
 }
 
 // --------------- Events -----------------------
@@ -170,8 +207,97 @@ exports.handler = (event, context, callback) => {
 };
 
 
-// OLD CODE:
 
+var writeToFile = function(url, filename) {
+    // Request the large preview image
+    var options = {
+        url: url,
+        encoding: null
+    };
+    request(options)
+        .pipe(fs.createWriteStream(filename))
+        .on('error', function(error) {
+            console.error('Request to get a preview image failed: ' + error.message);
+        });
+    console.log('Successfully wrote image to ' + filename);
+};
+
+// Takes in the name of asubreddit, and finds the location of the preview images of the top post
+// note, this function does not specifically error trap for bad subreddit names
+var getRedditImages = function(subreddit) {
+    // First get an access token from Reddit using this OAuth2 workflow
+    // https://github.com/reddit/reddit/wiki/OAuth2#application-only-oauth
+    var options = {
+    // Note: This is clientId:clientSecret@host
+    // Saving our request URL to an environment variable for safety reasons
+    url: process.env.REDDITACCESSTOKENURL,
+    method: 'POST',
+    headers: {
+        'User-Agent': 'request'
+    },
+    body: 'grant_type=client_credentials&username=&password='
+    };
+    request(options, function (error, response, body) {
+        if (error) {
+            console.error('Could not authenticate: ' + error.message);
+            // Should exit here
+        } else {
+            var bodyAsJson = JSON.parse(body);
+            // We now have an access token
+            var access_token = bodyAsJson.access_token;
+            console.log('access token is: ' + access_token);
+            var data;
+            var options = {
+                method: 'GET',
+                url: 'https://oauth.reddit.com/r/' + subreddit + '/top/.json',
+                qs: {
+                    count: 0
+                },
+                headers: {
+                    'Authorization': 'bearer ' + access_token,
+                    'User-Agent': 'agent'
+                },
+            };
+            request(options, function (error, response, body) {
+                if (error) {
+                    console.error('Failed to get top posts: ' + error.message);
+                    process.exit(1);
+                } else {
+                    data = JSON.parse(body);
+                    // Printing out the url of the image
+                    // Get the list of previews for the first image, go through the resolutions and pick appropriate sizes
+                    var previews = data.data.children[0].data.preview.images[0];
+                    var smallPreview = _.find(previews.resolutions, function(item) { return item.width >= 720 || item.height >= 480; });
+                    var largePreview = _.find(previews.resolutions, function(item) { return item.width >= 1200 || item.height >= 800; });
+
+                    // If none of the images met the small criteria, choose the first one
+                    if (!smallPreview) {
+                        smallPreview = _.first(previews.resolutions);
+                    }
+                    // If none of the images met the large criteria, choose the last one
+                    if (!largePreview) {
+                        largePreview = _.last(previews.resolutions);
+                    }
+
+                    if (smallPreview) {
+                        var smallPreviewDecoded = smallPreview.url.replace(/&amp;/g, "&");
+                        writeToFile(smallPreviewDecoded, 'small.jpg');
+                    }
+
+                    if (largePreview) {
+                        var largePreviewDecoded = largePreview.url.replace(/&amp;/g, "&");
+                        writeToFile(largePreviewDecoded, 'large.jpg');
+                    }
+                }
+            });
+        }
+    });
+};
+
+
+
+
+// Amazon sample code for reference
 /* Sets the color in the session and prepares the speech to reply to the user. */
  
 function setColorInSession(intent, session, callback) {
