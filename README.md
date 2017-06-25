@@ -1,2 +1,6 @@
 # AlexaCatso
 A simple Alexa skill that scrapes cat photos from reddit, and sends their links to the user's phone. I wrote this skill as part of my effort to learn more about accessing web APIs, and learning Node.JS / JS in general.
+
+Despite performing a relatively simple action, this skill does a few pretty complex things. Alexa has fairly strict regulations on what types of images can be displayed on cards in the alexa app, so images must be piped from their original location into an AWS s3 bucket. In order to ensure that the user doesn't recieve the same cat images over and over again, the skill grabs 3 images every hour to store in s3, and all invocations of that skill in that same hour will draw from those images. (This ensures that I don't get charged a ridiculous amount of money to maintain my s3 bucket for this free service.)
+
+If this skill grows a large enough user base, I could add some new code to pick images from multiple sources (rather than a single subreddit) and to pick images that are growing in popularity rather than just what is currently at the top of the subreddit (this should add more variety between refreshes / hours). Also I could split the image gathering code into a separate lambda function that just runs on the hour, which would allow me to simplify the code of this function and decrease runtime slightly. 
