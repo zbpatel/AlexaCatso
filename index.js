@@ -5,8 +5,46 @@
 // importing node packages
 var request = require('request');
 var _ = require('underscore');
+var async = require('async');
 var AWS = require('aws-sdk');
-var s3 = new AWS.S3();
+var s3;
+const kms = new AWS.KMS();
+
+
+var S3_BUCKET = 'alexaimagecache';
+var S3_BASE_URL = `https://s3.amazonaws.com/${S3_BUCKET}/`;
+var REDDIT_FILE_KEY = 'redditfiles.json';
+var STALE_AFTER = 60*60*1000;
+
+const AWSSECRET = 'AWSSECRET';
+const AWSACCESSKEY = 'AWSACCESSKEY';
+const REDDITACCESSTOKENURL = 'REDDITACCESSTOKENURL';
+const ENVKEYS = [AWSSECRET, AWSACCESSKEY, REDDITACCESSTOKENURL];
+
+var secrets = {};
+
+// uses the async package to run environment variable decryption calls in parallel
+function decryptAllEnv(callback) {
+    async.each(ENVKEYS, decryptEnv, callback);
+}
+
+// decrypts a single environment variable, and adds it to the secrets object
+function decryptEnv(envVar, callback) {
+    if (secrets[envVar]) {
+        callback();
+    } else {
+        // Decrypt code should run once and variables stored outside of the function
+        // handler so that these are decrypted once per container
+        kms.decrypt({ CiphertextBlob: new Buffer(process.env[envVar], 'base64') }, (err, data) => {
+            if (err) {
+                console.error('Decrypt error:', err);
+                return callback(err);
+            }
+            secrets[envVar] = data.Plaintext.toString('ascii');
+            callback();
+        });
+    }
+}
 
 // --------------- Helpers that build all of the responses -----------------------
 
@@ -44,8 +82,8 @@ function buildPhotoSpeechletResponse(title, speechOutput, textOutput, sImageURL,
             title: title,
             text: textOutput,
             image: {
-                smallImageUrl: "https://images-na.ssl-images-amazon.com/images/G/01/mobile-apps/dex/ask-customskills/cards-image-card._TTH_.png",
-                largeImageUrl: "https://images-na.ssl-images-amazon.com/images/G/01/mobile-apps/dex/ask-customskills/cards-image-card._TTH_.png",
+                smallImageUrl: sImageURL,
+                largeImageUrl: lImageURL
             }
         },
         reprompt: {
@@ -73,10 +111,36 @@ function getWelcomeResponse(callback) {
     // If we wanted to initialize the session to have some attributes we could add those here.
     const sessionAttributes = {};
     const cardTitle = 'Welcome';
-    const speechOutput = 'Welcome to Catso. Ask me for some photos.';
+    const speechOutput = 'Welcome to Catso. Ask me for a photo.';
     // If the user either does not reply to the welcome message or says something that is not
     // understood, they will be prompted again with this text.
     const repromptText = 'Would you like a cat photo?';
+    const shouldEndSession = false;
+
+    callback(sessionAttributes,
+        buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
+}
+
+function getHelpResponse(callback) {
+    // If we wanted to initialize the session to have some attributes we could add those here.
+    const sessionAttributes = {};
+    const cardTitle = 'Welcome';
+    const speechOutput = 'Welcome to Catso. I can send you funny cat photos. Ask me for a photo by saying "Catso, send me a cat photo:".';
+    // If the user either does not reply to the welcome message or says something that is not
+    // understood, they will be prompted again with this text.
+    const repromptText = 'Would you like a cat photo?';
+    const shouldEndSession = false;
+
+    callback(sessionAttributes,
+        buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
+}
+
+function getErrorResponse(callback) {
+    // If we wanted to initialize the session to have some attributes we could add those here.
+    const sessionAttributes = {};
+    const cardTitle = 'Error';
+    const speechOutput = 'Sorry, there was a problem getting a cat photo.';
+    const repromptText = 'Would you like to try again to get a cat photo?';
     const shouldEndSession = false;
 
     callback(sessionAttributes,
@@ -92,26 +156,61 @@ function handleSessionEndRequest(callback) {
     callback({}, buildSpeechletResponse(cardTitle, speechOutput, null, shouldEndSession));
 }
 
+// Uploads an image from urlToUpload to the S3 Bucket
+function sendImageToS3(urlToUpload, callback) {
+    // naming images after the current epoch time of upload (with ms)
+    // Also add a random integer because sometimes the millisecond time is the same as another
+    let index = Math.floor(Math.random() * 100);
+    var myKey = (new Date()).getTime() + index + '.jpg';
+
+    // Requesting our image
+    var options = {
+        url: urlToUpload,
+        encoding: null
+    };
+
+    request(options, function (error, response, body) {
+        if (error) {
+            console.error('Could not authenticate: ' + error.message);
+            callback(error);
+        } else {
+            var params = {Bucket: S3_BUCKET, Key: myKey, Body: body, ACL: 'public-read'};
+            s3.putObject(params, function(error, data) {
+                if (error) {
+                    console.log(error);
+                    callback(error);
+                } else {
+                    console.log(`Successfully uploaded data to ${S3_BUCKET}/${myKey}`);
+                    var s3Url = S3_BASE_URL + myKey;
+                    callback(undefined, s3Url);
+                }
+            });
+        }
+    });
+}
+
 // -------------- Main Intent Code --------------
 // Broad-scale event handler called from onIntent. This method handles the entire process of querying photos,
-// processing them, and sending them to the user's device in the speechlet response 
+// processing them, and sending them to the user's device in the speechlet response
 function getCatPhotosHandler(intent, session, callback) {
-    // using let instead of var here because we don't need these values outside this scope
-
-    // setting standard vars for output into 
-    let cardTitle = 'Cat Photos';
-    let repromptText = '';
-    let sessionAttributes = {};
-    let shouldEndSession = true;
-    let speechOutput = 'I have sent a cat photo to your phone. Check the Alexa app.';
-    let textOutput = 'Here is a cat photo:';
-
     // grabbing the image URLs from reddit
-    getRedditImages('cats', function(error, imgData) {
+    getCachedRedditImages('cats', function(error, imagesFromPosts) {
         if (error) {
             console.error(`Errored when attemping to get images : ${error.message}`);
-            // TODO: add speechlet with error message 
+            getErrorResponse(callback);
         } else {
+            // using let instead of var here because we don't need these values outside this scope
+            // setting standard vars for output into
+            let cardTitle = 'Cat Photo';
+            let repromptText = '';
+            let sessionAttributes = {};
+            let shouldEndSession = true;
+            let speechOutput = 'I have sent you a cat photo. Check the Alexa app on your phone.';
+            let textOutput = 'Here is your cat photo:';
+
+            // Pick a random image out of the array
+            let index = Math.floor(Math.random() * imagesFromPosts.length);
+            let imgData = imagesFromPosts[index];
             callback(sessionAttributes,
                 buildPhotoSpeechletResponse(cardTitle, speechOutput, textOutput, imgData.small, imgData.large, repromptText, shouldEndSession));
         }
@@ -148,10 +247,9 @@ function onIntent(intentRequest, session, callback) {
 
     // Dispatch to your skill's intent handlers
     if (intentName === 'GETCATPHOTOINTENT') {
-        //TODO: change this line
         getCatPhotosHandler(intent, session, callback);
     } else if (intentName === 'AMAZON.HelpIntent') {
-        getWelcomeResponse(callback);
+        getHelpResponse(callback);
     } else if (intentName === 'AMAZON.StopIntent' || intentName === 'AMAZON.CancelIntent') {
         handleSessionEndRequest(callback);
     } else {
@@ -181,38 +279,97 @@ exports.handler = (event, context, callback) => {
          * Uncomment this if statement and populate with your skill's application ID to
          * prevent someone else from configuring a skill that sends requests to this function.
          */
-        
+
         if (event.session.application.applicationId !== 'amzn1.ask.skill.b58f87e5-4321-40fe-ac0d-0c5a5236a405') {
              callback('Invalid Application ID');
         }
+        // decrypting environment variables
+        decryptAllEnv(function (error) {
+            if (error) {
+                console.error(`Error decrypting environment variables ${error.message}`);
+            }  else { 
+                // adding in our access key for AWS
+                AWS.config.update({ accessKeyId: secrets[AWSACCESSKEY], secretAccessKey: secrets[AWSSECRET]});
+                
+                // MUST be done after AWS.config call, otherwise access will be denied to S3
+                s3 = new AWS.S3();
+                if (event.session.new) {
+                    onSessionStarted({ requestId: event.request.requestId }, event.session);
+                }
 
-        if (event.session.new) {
-            onSessionStarted({ requestId: event.request.requestId }, event.session);
-        }
-
-        if (event.request.type === 'LaunchRequest') {
-            onLaunch(event.request,
-                event.session,
-                (sessionAttributes, speechletResponse) => {
-                    callback(null, buildResponse(sessionAttributes, speechletResponse));
-                });
-        } else if (event.request.type === 'IntentRequest') {
-            onIntent(event.request,
-                event.session,
-                (sessionAttributes, speechletResponse) => {
-                    callback(null, buildResponse(sessionAttributes, speechletResponse));
-                });
-        } else if (event.request.type === 'SessionEndedRequest') {
-            onSessionEnded(event.request, event.session);
-            callback();
-        }
+                if (event.request.type === 'LaunchRequest') {
+                    onLaunch(event.request,
+                        event.session,
+                        (sessionAttributes, speechletResponse) => {
+                            callback(null, buildResponse(sessionAttributes, speechletResponse));
+                        });
+                } else if (event.request.type === 'IntentRequest') {
+                    onIntent(event.request,
+                        event.session,
+                        (sessionAttributes, speechletResponse) => {
+                            callback(null, buildResponse(sessionAttributes, speechletResponse));
+                        });
+                } else if (event.request.type === 'SessionEndedRequest') {
+                    onSessionEnded(event.request, event.session);
+                    callback();
+                }
+            }
+        });
     } catch (err) {
         callback(err);
     }
 };
 
-// Takes in the name of asubreddit, and finds the location of the preview images of the top post
-// preview images are then saved to the .small and .large fields of the imgData param
+// For one Reddit post, retreive both a small and large preview Url
+function getSmallAndLargeImageUrls(redditPost, callback) {
+    // Get the list of previews for the first image, go through the resolutions and pick appropriate sizes
+    var previews = redditPost.data.preview.images[0];
+    var smallPreview = _.find(previews.resolutions, function(item) { return item.width >= 720 || item.height >= 480; });
+    var largePreview = _.find(previews.resolutions, function(item) { return item.width >= 1200 || item.height >= 800; });
+    var imgData = {}; // return object
+
+    // If none of the images met the small criteria, choose the last one
+    if (!smallPreview) {
+        smallPreview = _.last(previews.resolutions);
+    }
+    // If none of the images met the large criteria, choose the last one
+    if (!largePreview) {
+        largePreview = _.last(previews.resolutions);
+    }
+
+    if (smallPreview) {
+        var smallPreviewDecoded = smallPreview.url.replace(/&amp;/g, "&");
+        sendImageToS3(smallPreviewDecoded, function(error, s3Url){
+            if (error) {
+                console.error(`Error uploading to S3: ${error.message}`);
+                callback(error);
+            } else {
+                imgData.small = s3Url;
+                // TODO: optimize to upload one image when both previews are the same
+                if (largePreview) {
+                    var largePreviewDecoded = largePreview.url.replace(/&amp;/g, "&");
+                    sendImageToS3(largePreviewDecoded, function(error, s3Url) {
+                        if (error) {
+                            console.error(`Error uploading to S3: ${error.message}`);
+                            callback(error);
+                        } else {
+                            imgData.large = s3Url;
+                            callback(undefined, imgData);
+                        }
+                    });
+                } else {
+                    imgData.large = imgData.small;
+                    callback(undefined, imgData);
+                }
+            }
+        });
+    }
+}
+
+// Takes in the name of asubreddit, and finds the location of the preview images all the posts.
+// Preview images of all posts are uploaded to S3.  The list of uploaded image Urls is sent
+// in the callback as an array of objects.  Each object has a .small and .large field which are
+// S3 Urls.
 // note, this function does not specifically error trap for bad subreddit names
 var getRedditImages = function(subreddit, callback) {
     // First get an access token from Reddit using this OAuth2 workflow
@@ -220,7 +377,7 @@ var getRedditImages = function(subreddit, callback) {
     var options = {
         // Note: This is clientId:clientSecret@host
         // Saving our request URL to an environment variable for safety reasons
-        url: process.env.REDDITACCESSTOKENURL,
+        url: secrets[REDDITACCESSTOKENURL],
         method: 'POST',
         headers: {
             'User-Agent': 'request'
@@ -237,7 +394,7 @@ var getRedditImages = function(subreddit, callback) {
             // We now have an access token
             var access_token = bodyAsJson.access_token;
             console.log('access token is: ' + access_token);
-            var data;
+            var redditPosts;
             var options = {
                 method: 'GET',
                 url: 'https://oauth.reddit.com/r/' + subreddit + '/top/.json',
@@ -254,95 +411,84 @@ var getRedditImages = function(subreddit, callback) {
                     console.error('Failed to get top posts: ' + error.message);
                     callback(error);
                 } else {
-                    data = JSON.parse(body);
-                    // Printing out the url of the image
-                    // Get the list of previews for the first image, go through the resolutions and pick appropriate sizes
-                    var previews = data.data.children[0].data.preview.images[0];
-                    var smallPreview = _.find(previews.resolutions, function(item) { return item.width >= 720 || item.height >= 480; });
-                    var largePreview = _.find(previews.resolutions, function(item) { return item.width >= 1200 || item.height >= 800; });
-                    var imgData = {}; // return object
-
-                    // If none of the images met the small criteria, choose the first one
-                    if (!smallPreview) {
-                        smallPreview = _.last(previews.resolutions);
-                    }
-                    // If none of the images met the large criteria, choose the last one
-                    if (!largePreview) {
-                        largePreview = _.last(previews.resolutions);
-                    }
-
-                    if (smallPreview) {
-                        var smallPreviewDecoded = smallPreview.url.replace(/&amp;/g, "&");
-                        imgData.small = smallPreviewDecoded;
-                    }
-
-                    if (largePreview) {
-                        var largePreviewDecoded = largePreview.url.replace(/&amp;/g, "&");
-                        imgData.large = largePreviewDecoded;
-                    }
-
-                    callback(undefined, imgData);
+                    redditPosts = JSON.parse(body).data.children;
+                    // Take only 3 items from list
+                    redditPosts = redditPosts.slice(0,3);
+                    async.map(
+                        redditPosts,
+                        getSmallAndLargeImageUrls,
+                        function(error, imagesFromPosts) {
+                            if (error) {
+                                console.error(`Failed to process post: ${error.message}`);
+                                callback(error);
+                            } else {
+                                callback(undefined, imagesFromPosts);
+                            }
+                        }
+                    );
                 }
             });
         }
     });
+};
 
-
+// Get Reddit images and save them to an S3 file with a timestamp
+function updateRedditImagesOnS3(subreddit, callback) {
+    getRedditImages(subreddit, function(error, imagesFromPosts) {
+        if (error) {
+            callback(error);
+        } else {
+            let fileContents = {
+                timestamp: (new Date()).getTime(),
+                imagesFromPosts: imagesFromPosts
+            };
+            // Write this JSON as a string to a S3 file.
+            var params = {Bucket: S3_BUCKET, Key: REDDIT_FILE_KEY, Body: JSON.stringify(fileContents)};
+            s3.putObject(params, function(error, data) {
+                if (error) {
+                    console.error(error);
+                    callback(error);
+                } else {
+                    console.log(`Successfully created redddit file`);
+                    callback(undefined, imagesFromPosts);
+                }
+            });
+        }
+    });
 };
 
 
+// Check to see if reddit.json file exists on S3 and is not older than epsilon time
+// If it is, then update the reddit.json file with new data.
+function getCachedRedditImages(subreddit, callback) {
+    var params = {Bucket: S3_BUCKET, Key: REDDIT_FILE_KEY};
+    s3.getObject(params, function(error, data) {
+        var bNeedToUpdate = false;
+        if (error) {
+            // On error, update Reddit images
+            bNeedToUpdate = true;
+        } else {
+            let fileContents = JSON.parse(data.Body);
+            let now = (new Date()).getTime();
+            if ((now - fileContents.timestamp) > STALE_AFTER) {
+                bNeedToUpdate = true;
+            } else {
+                callback(undefined, fileContents.imagesFromPosts);
+            }
+        }
+        if (bNeedToUpdate) {
+            updateRedditImagesOnS3(subreddit, callback);
+        }
+    });
+};
 
 
-// Amazon sample code for reference
-/* Sets the color in the session and prepares the speech to reply to the user. */
- 
-function setColorInSession(intent, session, callback) {
-    const cardTitle = intent.name;
-    const favoriteColorSlot = intent.slots.Color;
-    let repromptText = '';
-    let sessionAttributes = {};
-    const shouldEndSession = false;
-    let speechOutput = '';
+// getCachedRedditImages('cats', function(error, imagesFromPosts) {
+//     if (error) {
+//         console.error(error);
+//     } else {
+//         console.log(imagesFromPosts);
+//     }
+// });
 
-    if (favoriteColorSlot) {
-        const favoriteColor = favoriteColorSlot.value;
-        sessionAttributes = createFavoriteColorAttributes(favoriteColor);
-        speechOutput = `I now know your favorite color is ${favoriteColor}. You can ask me ` +
-            "your favorite color by saying, what's my favorite color?";
-        repromptText = "You can ask me your favorite color by saying, what's my favorite color?";
-    } else {
-        speechOutput = "I'm not sure what your favorite color is. Please try again.";
-        repromptText = "I'm not sure what your favorite color is. You can tell me your " +
-            'favorite color by saying, my favorite color is red';
-    }
 
-    callback(sessionAttributes,
-         buildSpeechletResponse(cardTitle, speechOutput, repromptText, shouldEndSession));
-}
-
-/**/
-function getColorFromSession(intent, session, callback) {
-    let favoriteColor;
-    const repromptText = null;
-    const sessionAttributes = {};
-    let shouldEndSession = false;
-    let speechOutput = '';
-
-    if (session.attributes) {
-        favoriteColor = session.attributes.favoriteColor;
-    }
-
-    if (favoriteColor) {
-        speechOutput = `Your favorite color is ${favoriteColor}. Goodbye.`;
-        shouldEndSession = true;
-    } else {
-        speechOutput = "I'm not sure what your favorite color is, you can say, my favorite color " +
-            ' is red';
-    }
-
-    // Setting repromptText to null signifies that we do not want to reprompt the user.
-    // If the user does not respond or says something that is not understood, the session
-    // will end.
-    callback(sessionAttributes,
-         buildSpeechletResponse(intent.name, speechOutput, repromptText, shouldEndSession));
-}
