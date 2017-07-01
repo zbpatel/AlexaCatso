@@ -71,7 +71,7 @@ function buildSpeechletResponse(title, output, repromptText, shouldEndSession) {
 }
 
 // Constructs a speechlet response that includes an image in the card (that appears in the Alexa companion app)
-function buildPhotoSpeechletResponse(title, speechOutput, textOutput, sImageURL, lImageURL, repromptText, shouldEndSession) {
+function buildPhotoSpeechletResponse(title, speechOutput, sImageURL, lImageURL, repromptText, shouldEndSession) {
     return {
         outputSpeech: {
             type: 'PlainText',
@@ -80,7 +80,6 @@ function buildPhotoSpeechletResponse(title, speechOutput, textOutput, sImageURL,
         card: {
             type: 'Standard',
             title: title,
-            text: textOutput,
             image: {
                 smallImageUrl: sImageURL,
                 largeImageUrl: lImageURL
@@ -111,7 +110,7 @@ function getWelcomeResponse(callback) {
     // If we wanted to initialize the session to have some attributes we could add those here.
     const sessionAttributes = {};
     const cardTitle = 'Welcome';
-    const speechOutput = 'Welcome to Catso. Ask me for a photo.';
+    const speechOutput = 'Welcome to Cute Cats. Ask me for a photo.';
     // If the user either does not reply to the welcome message or says something that is not
     // understood, they will be prompted again with this text.
     const repromptText = 'Would you like a cat photo?';
@@ -125,7 +124,7 @@ function getHelpResponse(callback) {
     // If we wanted to initialize the session to have some attributes we could add those here.
     const sessionAttributes = {};
     const cardTitle = 'Welcome';
-    const speechOutput = 'Welcome to Catso. I can send you funny cat photos. Ask me for a photo by saying "Catso, send me a cat photo:".';
+    const speechOutput = 'Welcome to Cute Cats. I can send you funny cat photos. Ask me for a photo by saying "Cute Cats, send me a cat photo:".';
     // If the user either does not reply to the welcome message or says something that is not
     // understood, they will be prompted again with this text.
     const repromptText = 'Would you like a cat photo?';
@@ -212,7 +211,7 @@ function getCatPhotosHandler(intent, session, callback) {
             let index = Math.floor(Math.random() * imagesFromPosts.length);
             let imgData = imagesFromPosts[index];
             callback(sessionAttributes,
-                buildPhotoSpeechletResponse(cardTitle, speechOutput, textOutput, imgData.small, imgData.large, repromptText, shouldEndSession));
+                buildPhotoSpeechletResponse(cardTitle, speechOutput, imgData.small, imgData.large, repromptText, shouldEndSession));
         }
     });
 }
@@ -322,6 +321,9 @@ exports.handler = (event, context, callback) => {
 
 // For one Reddit post, retreive both a small and large preview Url
 function getSmallAndLargeImageUrls(redditPost, callback) {
+    // Checking to see if a post is flagged as "over 18" to meet Amazon content criteria
+    //if (redditPost.)
+
     // Get the list of previews for the first image, go through the resolutions and pick appropriate sizes
     var previews = redditPost.data.preview.images[0];
     var smallPreview = _.find(previews.resolutions, function(item) { return item.width >= 720 || item.height >= 480; });
